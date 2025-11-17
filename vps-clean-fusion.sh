@@ -231,19 +231,18 @@ main(){
 # ====== 安装/卸载处理 ======
 case "${1:-}" in
   --install)
-    title "🔧 安装模式" "配置每日自动清理"
-    chmod +x "$SCRIPT_PATH"
-    ( crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' || true; echo "0 3 * * * /bin/bash $SCRIPT_PATH >/dev/null 2>&1" ) | crontab -u root -
-    ok "安装成功！每天03:00自动运行"
-    log "脚本位置: $SCRIPT_PATH"
-    log "卸载命令: bash $SCRIPT_PATH --uninstall"
-    ;;
-  --uninstall)
-    title "🗑️ 卸载模式" "移除所有配置"
-    crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' | crontab -u root -
-    rm -f "$SCRIPT_PATH"
-    ok "卸载完成！已移除定时任务和脚本"
-    ;;
+  title "🔧 安装模式" "配置每日自动清理"
+  chmod +x "$SCRIPT_PATH"
+  ( crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' || true; echo "0 3 * * * /bin/bash $SCRIPT_PATH >/dev/null 2>&1" ) | crontab -u root -
+  ok "安装成功！每天03:00自动运行"
+  log "脚本位置: $SCRIPT_PATH"
+  log "卸载命令: bash $SCRIPT_PATH --uninstall"
+  
+  # 立即执行首次清理
+  log "正在执行首次清理..."
+  sleep 2
+  bash "$SCRIPT_PATH"
+  ;;
   *)
     main "$@"
     ;;
