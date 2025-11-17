@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ======================================================================
-# VPS Clean Fusion - 完整版
+# VPS Clean Fusion - 完整版（自动安装bc）
 # 保留：clean.sh的unzip卸载 + clean2.sh的全部深度清理
 # 支持: Debian/Ubuntu & AlmaLinux/RHEL/CentOS
+# 特性: 自动检测并安装bc
 # ======================================================================
 
 set -Eeuo pipefail
@@ -31,11 +32,24 @@ EXCLUDES=(
 )
 is_excluded(){ local p="$1"; for e in "${EXCLUDES[@]}"; do [[ "$p" == "$e"* ]] && return 0; done; return 1; }
 
-# ====== 平台识别 ======
+# ====== 平台识别与bc自动安装 ======
 PKG="unknown"
 if command -v apt-get >/dev/null 2>&1; then PKG="apt"; 
 elif command -v dnf >/dev/null 2>&1; then PKG="dnf";
 elif command -v yum >/dev/null 2>&1; then PKG="yum"; fi
+
+# 自动安装 bc（用于空间计算）
+check_and_install_bc(){
+  if ! command -v bc >/dev/null 2>&1; then
+    log "检测到 bc 未安装，正在自动安装..."
+    case "$PKG" in
+      apt) apt-get update -qq >/dev/null 2>&1 && apt-get install -y bc >/dev/null 2>&1 || warn "bc 安装失败，空间估算将使用粗略值" ;;
+      dnf|yum) (dnf install -y bc >/dev/null 2>&1 || yum install -y bc >/dev/null 2>&1) || warn "bc 安装失败，空间估算将使用粗略值" ;;
+      *) warn "未知包管理器，无法自动安装 bc" ;;
+    esac
+  fi
+}
+
 is_vm(){ command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet; }
 NI(){ nice -n 19 ionice -c3 bash -c "$*"; }
 
@@ -63,7 +77,7 @@ calc_before_clean(){
 main_clean(){
   title "🚀 开始深度清理" "预计可释放: ${1}MB"
   
-  # ====== 新增：卸载unzip（来自clean.sh）======
+  # 卸载unzip（来自clean.sh）
   log "卸载 unzip（如果已安装）..."
   pkg_purge unzip
   
@@ -74,20 +88,20 @@ main_clean(){
     dpkg --configure -a >/dev/null 2>&1 || true
   fi
 
-  # 日志清理（保留1天）
+  # 日志清理
   journalctl --rotate || true
   journalctl --vacuum-time=1d --vacuum-size=64M >/dev/null 2>&1 || true
   NI "find /var/log -type f \( -name '*.log' -o -name '*.old' -o -name '*.gz' \) -not -path '*/panel/logs/*' -not -path '*/wwwlogs/*' -exec truncate -s 0 {} + 2>/dev/null || true"
   : > /var/log/wtmp; : > /var/log/btmp; : > /var/log/lastlog; : > /var/log/faillog
 
-  # 缓存与临时文件（深度清理）
+  # 缓存与临时文件
   rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /var/cache/apt/archives/partial 2>/dev/null || true
   rm -rf /var/crash/* /var/lib/systemd/coredump/* /var/lib/nginx/tmp/* /var/lib/nginx/body/* /var/lib/nginx/proxy/* 2>/dev/null || true
   NI "find /tmp /var/tmp -xdev -type f -atime +1 -not -name 'sess_*' -delete 2>/dev/null || true"
   NI "find /tmp /var/tmp -xdev -type f -size +20M -not -name 'sess_*' -delete 2>/dev/null || true"
   NI "find /var/cache -xdev -type f -mtime +1 -delete 2>/dev/null || true"
 
-  # 系统瘦身（文档/本地化/静态库）
+  # 系统瘦身
   rm -rf /usr/share/man/* /usr/share/info/* /usr/share/doc/* 2>/dev/null || true
   [ -d /usr/share/locale ] && find /usr/share/locale -mindepth 1 -maxdepth 1 -type d | grep -Ev '(en|zh)' | xargs -r rm -rf 2>/dev/null || true
   [ -d /usr/lib/locale ] && ls /usr/lib/locale 2>/dev/null | grep -Ev '^(en|zh)' | xargs -r -I{} rm -rf "/usr/lib/locale/{}" 2>/dev/null || true
@@ -110,7 +124,7 @@ main_clean(){
     rm -rf /var/cache/dnf/* /var/cache/yum/* 2>/dev/null || true
   fi
 
-  # 组件裁剪（移除非必需服务）
+  # 组件裁剪
   if [ "$PKG" = "apt" ]; then
     pkg_purge snapd cloud-init apport whoopsie popularity-contest landscape-client ubuntu-advantage-tools unattended-upgrades
     pkg_purge cockpit* avahi-daemon cups* modemmanager network-manager* plymouth* fwupd* printer-driver-* xserver-xorg* x11-* wayland*
@@ -119,7 +133,7 @@ main_clean(){
     pkg_purge man-db man-pages groff-base texinfo
   fi
 
-  # Snap生态彻底清理
+  # Snap生态清理
   if command -v snap >/dev/null 2>&1; then
     snap list 2>/dev/null | sed '1d' | awk '{print $1}' | while read app; do snap remove "$app" >/dev/null 2>&1 || true; done
   fi
@@ -128,7 +142,7 @@ main_clean(){
   pkg_purge snapd
   rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd 2>/dev/null || true
 
-  # 虚机firmware裁剪（物理机保留）
+  # 虚机firmware裁剪
   if is_vm; then
     pkg_purge linux-firmware >/dev/null 2>&1 || true
     rm -rf /lib/firmware/* 2>/dev/null || true
@@ -143,7 +157,7 @@ main_clean(){
     NI "find '$base' -type f \( -name '*.zip' -o -name '*.tar*' -o -name '*.bak' \) -delete 2>/dev/null || true"
   done
 
-  # 大文件清理（安全路径 >50MB）
+  # 大文件清理（>50MB）
   SAFE_BASES=(/tmp /var/tmp /var/cache /var/backups /root /home)
   for base in "${SAFE_BASES[@]}"; do
     [[ -d "$base" ]] || continue
@@ -153,7 +167,7 @@ main_clean(){
     done < <(find "$base" -xdev -type f -size +50M -print0 2>/dev/null)
   done
 
-  # 旧内核清理（保留当前+最新）
+  # 旧内核清理
   if [ "$PKG" = "apt" ]; then
     CURK=$(uname -r)
     mapfile -t KS < <(dpkg -l | awk '/linux-image-[0-9]/{print $2}' | sort -V)
@@ -180,11 +194,11 @@ main_clean(){
     sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
   fi
 
-  # fstrim优化
+  # fstrim磁盘优化
   command -v fstrim >/dev/null 2>&1 && NI "fstrim -av >/dev/null 2>&1 || true"
 }
 
-# ====== Swap管理（完整保留）======
+# ====== Swap管理 ======
 manage_swap(){
   title "💾 Swap管理" "内存≥2G禁用；<2G保留单一swap"
   calc_target_mib(){ local mem_kb; mem_kb=$(grep -E '^MemTotal:' /proc/meminfo | tr -s ' ' | cut -d' ' -f2); echo $(( (mem_kb/1024/2 < 256) ? 256 : (mem_kb/1024/2 > 2048) ? 2048 : mem_kb/1024/2 )); }
@@ -212,6 +226,7 @@ manage_swap(){
 # ====== 主流程 ======
 main(){
   title "🌟 VPS Clean Fusion 完整版" "智能清理开始"
+  check_and_install_bc  # 自动安装bc
   log "平台: ${PKG}, 虚拟化: $(is_vm && echo "VM" || echo "Physical")"
   
   local EST_MB=$(calc_before_clean)
@@ -231,18 +246,24 @@ main(){
 # ====== 安装/卸载处理 ======
 case "${1:-}" in
   --install)
-  title "🔧 安装模式" "配置每日自动清理"
-  chmod +x "$SCRIPT_PATH"
-  ( crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' || true; echo "0 3 * * * /bin/bash $SCRIPT_PATH >/dev/null 2>&1" ) | crontab -u root -
-  ok "安装成功！每天03:00自动运行"
-  log "脚本位置: $SCRIPT_PATH"
-  log "卸载命令: bash $SCRIPT_PATH --uninstall"
-  
-  # 立即执行首次清理
-  log "正在执行首次清理..."
-  sleep 2
-  bash "$SCRIPT_PATH"
-  ;;
+    title "🔧 安装模式" "配置每日自动清理"
+    chmod +x "$SCRIPT_PATH"
+    ( crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' || true; echo "0 3 * * * /bin/bash $SCRIPT_PATH >/dev/null 2>&1" ) | crontab -u root -
+    ok "安装成功！每天03:00自动运行"
+    log "脚本位置: $SCRIPT_PATH"
+    log "卸载命令: bash $SCRIPT_PATH --uninstall"
+    
+    # 立即执行首次清理
+    log "正在执行首次清理..."
+    sleep 2
+    bash "$SCRIPT_PATH"
+    ;;
+  --uninstall)
+    title "🗑️ 卸载模式" "移除所有配置"
+    crontab -u root -l 2>/dev/null | grep -v 'vps-clean-fusion.sh' | crontab -u root -
+    rm -f "$SCRIPT_PATH"
+    ok "卸载完成！已移除定时任务和脚本"
+    ;;
   *)
     main "$@"
     ;;
